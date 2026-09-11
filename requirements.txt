@@ -1,6 +1,4 @@
-opencv-python
-face_recognition
-numpy
-pyttsx3
-cmake
-dlib
+Flask
+firebase-admin
+gunicorn
+requests
