@@ -9,6 +9,11 @@ import socket
 import threading
 from datetime import datetime
 from pathlib import Path
+import firebase_service
+
+# Initialize Firebase Admin SDK
+firebase_service.initialize_firebase()
+
 
 PORT = 5000
 SYSTEM_NAME = "VeriUniform Sentinel"
@@ -1706,8 +1711,15 @@ class TROPortalHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(csv_content)
             return
 
+        # API: Firebase Connection & Queue Health Status
+        elif path == "/api/firebase/status":
+            status = firebase_service.get_connection_status()
+            self.send_json(200, status)
+            return
+
         else:
             self.send_error(404, "Page Not Found")
+
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)

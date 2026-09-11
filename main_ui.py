@@ -10,6 +10,11 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 from uniform_config import UNIFORM_COLORS, UNIFORM_THRESHOLD, MALE_THRESHOLD_EXTRA
+import firebase_service
+
+# Initialize Firebase Admin SDK
+firebase_service.initialize_firebase()
+
 
 # =============================================================================
 # 1. FACE ENCODINGS LOADER
@@ -139,8 +144,19 @@ def log_student(name, uniform_pct, status):
             recent_activity.pop(0)
             
         print(f"[LOGGED] {name} -> {status} ({uniform_pct:.1f}%)")
+        
+        # Real-time Firebase sync
+        firebase_service.log_attendance_scan(name, uniform_pct, status)
+        firebase_service.log_compliance_event(name, status, uniform_pct)
+        firebase_service.update_sentinel_status({
+            "total_passed": total_passed,
+            "total_failed": total_failed,
+            "last_scanned_person": name,
+            "last_status": status
+        })
     except Exception as e:
         print(f"Logging error: {e}")
+
 
 init_logging()
 
