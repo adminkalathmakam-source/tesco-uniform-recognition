@@ -1955,7 +1955,7 @@ class TROPortalHandler(http.server.BaseHTTPRequestHandler):
                         print(f"Error updating local log file: {ex}")
 
                 self.send_json(200, {
-                    "success": "True",
+                    "success": True,
                     "message": f"Successfully updated status for {student_name} to {new_result}",
                     "name": student_name,
                     "result": new_result
