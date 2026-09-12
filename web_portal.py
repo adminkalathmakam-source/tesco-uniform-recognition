@@ -15,7 +15,7 @@ import firebase_service
 firebase_service.initialize_firebase()
 
 
-PORT = 5000
+PORT = int(os.environ.get("PORT", 5000))
 SYSTEM_NAME = "VeriUniform Sentinel"
 SYSTEM_TAGLINE = "Tesco & TRO Biometric Uniform Intelligence Platform"
 
@@ -66,18 +66,31 @@ def get_local_ip():
         return "127.0.0.1"
 
 def get_available_dates():
-    dates = []
+    dates_set = set()
+    
+    # Query distinct dates from Firebase Firestore
+    fb_dates = firebase_service.get_available_firebase_dates()
+    for fd in fb_dates:
+        dates_set.add(fd)
+
+    # Query local disk log directories
     log_root = Path("logs")
     if log_root.exists():
-        for d in sorted(log_root.iterdir(), reverse=True):
+        for d in log_root.iterdir():
             if d.is_dir() and (d / "attendance.txt").exists():
-                dates.append(d.name)
+                dates_set.add(d.name)
+
     today = datetime.now().strftime("%Y-%m-%d")
-    if today not in dates:
-        dates.insert(0, today)
-    return dates
+    dates_set.add(today)
+    return sorted(list(dates_set), reverse=True)
 
 def parse_attendance_log(date_str):
+    # Attempt to fetch attendance scans from Firebase Firestore first
+    fb_stats, fb_records = firebase_service.fetch_attendance_from_firebase(date_str)
+    if fb_stats is not None and fb_records is not None and len(fb_records) > 0:
+        return fb_stats, fb_records
+
+    # Fallback to local disk file if Firebase has no records or is unreachable
     log_file = Path(f"logs/{date_str}/attendance.txt")
     records = []
     scanned_names = set()
@@ -170,7 +183,8 @@ def parse_attendance_log(date_str):
         "full_pass": full_pass_count,
         "uniform_missing_count": uniform_missing_count,
         "badge_missing_count": badge_missing_count,
-        "compliance_rate": compliance_rate
+        "compliance_rate": compliance_rate,
+        "data_source": "Local Disk Log"
     }
     return stats, records
 
@@ -1054,6 +1068,62 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             color: #ffffff;
         }}
 
+        .btn-override-quick {{
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            color: #10b981;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .btn-override-quick:hover {{
+            background: #10b981;
+            color: #050811;
+            box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
+            transform: translateY(-1px);
+        }}
+
+        .btn-override-pass {{
+            background: #10b981;
+            color: #050811;
+            border: none;
+            padding: 9px 14px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.15s ease;
+        }}
+        .btn-override-pass:hover {{ transform: scale(1.03); }}
+
+        .btn-override-badgemiss {{
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            padding: 9px 14px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+        }}
+
+        .btn-override-fail {{
+            background: rgba(244, 63, 94, 0.2);
+            color: #f43f5e;
+            border: 1px solid rgba(244, 63, 94, 0.4);
+            padding: 9px 14px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+        }}
+
         .empty-state {{
             text-align: center;
             padding: 56px 20px;
@@ -1372,6 +1442,17 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
                 <div style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; margin-bottom: 4px; font-weight:700;">Final Disciplinary Status</div>
                 <div id="modalVerdictTag"></div>
             </div>
+
+            <!-- Teacher / Admin Manual Override Controls -->
+            <div style="margin-top: 16px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 14px; padding: 14px;">
+                <div style="font-size:0.8rem; font-weight:700; color: #10b981; text-transform:uppercase; margin-bottom:6px;">✏️ Teacher / Admin Manual Override</div>
+                <div style="font-size:0.78rem; color: var(--text-muted); margin-bottom:12px;">If camera recognition was incorrect, teachers can override the result below:</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button class="btn-override-pass" onclick="submitOverride('PASS', 'Fully Compliant', 'Uniform Complete', 'Badge Verified')">✓ Mark Full Uniform</button>
+                    <button class="btn-override-badgemiss" onclick="submitOverride('FAIL', 'Badge Missing', 'Uniform Complete', 'Badge Missing')">⚠️ Mark Badge Missing</button>
+                    <button class="btn-override-fail" onclick="submitOverride('FAIL', 'Uniform Missing', 'Uniform Missing', 'Badge Missing')">❌ Mark Uniform Missing</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1524,14 +1605,20 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
                         <td>${{badgePill}}</td>
                         <td>${{verdictBadge}}</td>
                         <td>
-                            <button class="btn-inspect" onclick='openModal(${{JSON.stringify(r)}})'>Inspect</button>
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <button class="btn-inspect" onclick='openModal(${{JSON.stringify(r)}})'>Inspect</button>
+                                <button class="btn-override-quick" onclick='quickOverrideFullUniform("${{r.name.replace(/'/g, "\\'")}}")' title="Teacher Quick Override to Full Uniform">✏️ Set Full Uniform</button>
+                            </div>
                         </td>
                     </tr>
                 `;
             }}).join('');
         }}
 
+        let currentModalRecord = null;
+
         function openModal(record) {{
+            currentModalRecord = record;
             document.getElementById('modalName').innerText = record.name;
             document.getElementById('modalAvatar').innerText = record.name.charAt(0);
             document.getElementById('modalTime').innerText = `Scanned at ${{record.time}} (${{currentDate}})`;
@@ -1566,6 +1653,56 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             }}
 
             document.getElementById('inspectModal').style.display = 'flex';
+        }}
+
+        async function quickOverrideFullUniform(studentName) {{
+            if (!confirm(`Are you sure you want to mark ${{studentName}} as wearing FULL UNIFORM?`)) return;
+            await sendOverride(studentName, 'PASS', 'Fully Compliant', 'Uniform Complete', 'Badge Verified');
+        }}
+
+        async function submitOverride(status, result, uniformStatus, badgeStatus) {{
+            if (!currentModalRecord) return;
+            await sendOverride(currentModalRecord.name, status, result, uniformStatus, badgeStatus);
+            closeModal();
+        }}
+
+        async function sendOverride(name, status, result, uniformStatus, badgeStatus) {{
+            try {{
+                const res = await fetch('/api/override-status', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        name: name,
+                        date: currentDate,
+                        status: status,
+                        result: result,
+                        uniform_status: uniformStatus,
+                        badge_status: badgeStatus
+                    }})
+                }});
+                const data = await res.json();
+                if (data.success) {{
+                    showToast(`✓ Updated ${{name}} to ${{result}}`);
+                    loadAttendance(currentDate);
+                }} else {{
+                    alert('Override failed: ' + (data.error || 'Unknown error'));
+                }}
+            }} catch (e) {{
+                alert('Error connecting to server: ' + e);
+            }}
+        }}
+
+        function showToast(msg) {{
+            let toast = document.getElementById('toastNotice');
+            if (!toast) {{
+                toast = document.createElement('div');
+                toast.id = 'toastNotice';
+                toast.style.cssText = 'position:fixed; bottom:24px; right:24px; background:#10b981; color:#050811; font-weight:700; padding:12px 20px; border-radius:10px; z-index:9999; font-family:sans-serif; box-shadow:0 4px 14px rgba(16,185,129,0.4); font-size:0.9rem; transition:all 0.3s;';
+                document.body.appendChild(toast);
+            }}
+            toast.innerText = msg;
+            toast.style.display = 'block';
+            setTimeout(() => {{ toast.style.display = 'none'; }}, 3000);
         }}
 
         function closeModal() {{
@@ -1759,6 +1896,72 @@ class TROPortalHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(resp_data)))
             self.end_headers()
             self.wfile.write(resp_data)
+            return
+
+        elif path == "/api/override-status":
+            user = self.get_authenticated_user()
+            if not user:
+                self.send_json(401, {"success": False, "error": "Unauthorized"})
+                return
+
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode("utf-8"))
+                student_name = data.get("name", "").strip()
+                date_req = data.get("date", datetime.now().strftime("%Y-%m-%d")).strip()
+                new_status = data.get("status", "PASS")
+                new_result = data.get("result", "Fully Compliant")
+                new_uniform_status = data.get("uniform_status", "Uniform Complete")
+                new_badge_status = data.get("badge_status", "Badge Verified")
+
+                if not student_name:
+                    self.send_json(400, {"success": False, "error": "Student name is required"})
+                    return
+
+                # 1. Update Firebase Firestore
+                fb_update = {
+                    "status": new_status,
+                    "result": new_result,
+                    "uniform_status": new_uniform_status,
+                    "badge_status": new_badge_status,
+                    "uniform_pct": 100.0 if new_status == "PASS" else 0.0,
+                    "overridden_by": user["name"],
+                    "overridden_at": datetime.now().isoformat()
+                }
+                firebase_service.update_attendance_scan_in_firebase(student_name, date_req, fb_update)
+
+                # 2. Update Local Disk Log file if present
+                log_file = Path(f"logs/{date_req}/attendance.txt")
+                if log_file.exists():
+                    try:
+                        lines = []
+                        updated_local = False
+                        with open(log_file, "r", encoding="utf-8") as f:
+                            for line in f:
+                                if f" {student_name} - " in line:
+                                    time_part = line[1:line.find("]")] if "[" in line and "]" in line else datetime.now().strftime("%H:%M:%S")
+                                    badge_str = "YES" if new_badge_status == "Badge Verified" else "NO"
+                                    lines.append(f"[{time_part}] {student_name} - {new_uniform_status} - Badge: {badge_str} ({new_status})\n")
+                                    updated_local = True
+                                else:
+                                    lines.append(line)
+                        if not updated_local:
+                            lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {student_name} - {new_uniform_status} - Badge: YES ({new_status})\n")
+                        
+                        with open(log_file, "w", encoding="utf-8") as f:
+                            f.writelines(lines)
+                    except Exception as ex:
+                        print(f"Error updating local log file: {ex}")
+
+                self.send_json(200, {
+                    "success": "True",
+                    "message": f"Successfully updated status for {student_name} to {new_result}",
+                    "name": student_name,
+                    "result": new_result
+                })
+            except Exception as e:
+                self.send_json(400, {"success": False, "error": str(e)})
             return
 
         else:
