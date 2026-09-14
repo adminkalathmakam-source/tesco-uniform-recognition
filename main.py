@@ -6,23 +6,90 @@ import cv2
 import face_recognition
 import pickle
 import numpy as np
-import firebase_service
+import firebase_service_3 as firebase_service
 from uniform_config import UNIFORM_COLORS, UNIFORM_THRESHOLD, NAVY_REQUIRED_MIN_PCT
-from flask import Flask
+from flask import Flask, jsonify, request, cors_enabled if hasattr(Flask, 'cors_enabled') else None
 
-# Initialize Flask app for Render Web Service health checks
+# Initialize Flask app for Render Web Service
 app = Flask(__name__)
+
+# Enable CORS headers so your external/frontend web app can talk to this Flask backend
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
+    return response
+
+# Initialize Firebase Admin SDK [cite: 34]
+firebase_service.initialize_firebase()
 
 @app.route('/')
 def health_check():
-    return "Tesco Worker Recognition Service is running!", 200
+    return jsonify({
+        "status": "online",
+        "service": "Tesco Worker Recognition & Sentinel Service",
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
-# Initialize Firebase Admin SDK
-firebase_service.initialize_firebase()
+@app.route('/api/attendance', methods=['GET'])
+def get_attendance():
+    """Fetch attendance records and daily stats from Firebase Firestore for a given date [cite: 34]."""
+    date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+    stats, records = firebase_service.fetch_attendance_from_firebase(date_str)
+    if stats is None:
+        return jsonify({
+            "status": "empty",
+            "date": date_str,
+            "message": "No records found for this date in Firebase."
+        }), 200
+    return jsonify({
+        "status": "success",
+        "stats": stats,
+        "records": records
+    }), 200
+
+@app.route('/api/status', methods=['GET'])
+def get_sentinel_status():
+    """Fetch the live Sentinel status document from Firebase Firestore [cite: 34]."""
+    status_doc = firebase_service.fetch_sentinel_status_from_firebase()
+    return jsonify({
+        "status": "success",
+        "data": status_doc or {}
+    }), 200
+
+@app.route('/api/connection', methods=['GET'])
+def get_firebase_connection():
+    """Check Firebase connection health and queue status [cite: 34]."""
+    return jsonify(firebase_service.get_connection_status()), 200
+
+@app.route('/api/override', methods=['POST'])
+def override_attendance():
+    """Allow an admin/teacher to manually override an attendance scan result in Firebase [cite: 34]."""
+    data = request.get_json() or {}
+    name = data.get('name')
+    date_str = data.get('date_str', datetime.now().strftime('%Y-%m-%d'))
+    new_status = data.get('status', 'PASS')
+    
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+        
+    update_dict = {
+        "status": new_status,
+        "result": "Fully Compliant" if new_status == 'PASS' else "Uniform Missing",
+        "uniform_status": "Uniform Complete",
+        "badge_status": "Badge Verified",
+        "manual_override": True,
+        "override_timestamp": datetime.now().isoformat()
+    }
+    
+    success = firebase_service.update_attendance_scan_in_firebase(name, date_str, update_dict)
+    return jsonify({"success": success}), 200
+
 
 def detect_uniform_status(frame, person_region, threshold=None):
     """
-    Extract upper torso below detected face and analyze uniform HSV colors and badge.
+    Extract upper torso below detected face and analyze uniform HSV colors and badge [cite: 36].
     Returns: (is_wearing_uniform, uniform_percentage, navy_percentage, status_dict)
     """
     top, right, bottom, left = person_region
@@ -35,12 +102,12 @@ def detect_uniform_status(frame, person_region, threshold=None):
     torso_width = int(face_width * 1.3)
     center_x = (left + right) // 2
     torso_left = max(0, center_x - torso_width // 2)
-    torso_right = min(frame.shape[1], center_x + torso_width // 2)
+    torso_right = min(frame.shape, center_x + torso_width // 2)
     
     torso_box = (torso_left, torso_top, torso_right, torso_bottom)
     torso = frame[torso_top:torso_bottom, torso_left:torso_right]
     
-    if torso.size == 0 or torso.shape[0] < 10 or torso.shape[1] < 10:
+    if torso.size == 0 or torso.shape[0] < 10 or torso.shape < 10:
         return False, 0.0, 0.0, {
             "has_uniform": False,
             "has_badge": False,
@@ -74,7 +141,7 @@ def detect_uniform_status(frame, person_region, threshold=None):
             else:
                 navy_mask = cv2.bitwise_or(navy_mask, color_mask)
 
-    total_pixels = torso.shape[0] * torso.shape[1]
+    total_pixels = torso.shape[0] * torso.shape
     uniform_pixels = cv2.countNonZero(combined_mask) if combined_mask is not None else 0
     navy_pixels = cv2.countNonZero(navy_mask) if navy_mask is not None else 0
 
@@ -159,14 +226,14 @@ known_face_encodings, known_face_names = load_encodings()
 logged_names = {}
 
 def process_video_stream():
-    """Background worker process to handle video streams safely in cloud environments."""
+    """Background worker process to handle video streams safely in cloud environments [cite: 36]."""
     global logged_names
-    stream_url = os.environ.get("STREAM_URL") # Set this in Render Dashboard if using an IP camera/RTSP stream
+    stream_url = os.environ.get("STREAM_URL")
 
     if not stream_url:
-        print("[INFO] No STREAM_URL provided. Background processing idle (Web server active).")
+        print("[INFO] No STREAM_URL provided. Background processing idle (Web server active) [cite: 36].")
         while True:
-            time.sleep(60) # Keep thread alive without spamming CPU
+            time.sleep(60)
 
     while True:
         cap = cv2.VideoCapture(stream_url)
@@ -175,7 +242,7 @@ def process_video_stream():
             time.sleep(10)
             continue
 
-        print("Video stream connected successfully.")
+        print("Video stream connected successfully [cite: 36].")
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -221,10 +288,8 @@ def process_video_stream():
 
 if __name__ == "__main__":
     if known_face_encodings is not None:
-        # Start background thread for video processing
         bg_thread = threading.Thread(target=process_video_stream, daemon=True)
         bg_thread.start()
 
-    # Start Flask web server to satisfy Render's port binding requirements
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
